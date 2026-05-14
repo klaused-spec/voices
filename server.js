@@ -16,6 +16,7 @@ const AUTH_TOKEN = process.env.AUTH_TOKEN || '';
 const DEFAULT_VOICE = process.env.DEFAULT_VOICE || 'Kore';
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'gemini-2.5-flash-preview-tts';
 const LIVE_MODEL = process.env.LIVE_MODEL || 'gemini-2.0-flash-live-001';
+const LIVE_SYSTEM = 'Você é um leitor de texto. Leia o texto do usuário em voz alta, exatamente como escrito, sem comentários adicionais.';
 const GEMINI_MODE = process.env.GEMINI_MODE || 'live'; // 'live' ou 'stream'
 const CACHE_TTL_MS = parseInt(process.env.CACHE_TTL || String(86400 * 7)) * 1000;
 const MAX_CACHE_ENTRIES = parseInt(process.env.MAX_CACHE_ENTRIES || '500');
@@ -127,6 +128,9 @@ function synthesizeLive(text, voice, apiKey, httpRes, format) {
       ws.send(JSON.stringify({
         setup: {
           model: `models/${LIVE_MODEL}`,
+          systemInstruction: {
+            parts: [{ text: LIVE_SYSTEM }]
+          },
           generationConfig: {
             responseModalities: ['AUDIO'],
             speechConfig: {
