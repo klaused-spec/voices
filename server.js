@@ -357,12 +357,11 @@ async function tryModel(text, voice, model, httpRes, format) {
   throw { code: 429, body: lastErr };
 }
 
-// ─── Modelo fallback quando TTS esgota quota ────────────────
-const FALLBACK_MODEL = process.env.FALLBACK_MODEL || 'gemini-2.5-flash-preview-tts';
+// ─── Modelos TTS fallback (só modelos com suporte a áudio) ──
 const FALLBACK_MODELS = [
   'gemini-2.5-flash-preview-tts',
-  'gemini-2.5-flash',
-  'gemini-2.0-flash',
+  'gemini-3.1-flash-tts-preview',
+  'gemini-2.5-pro-preview-tts',
 ];
 
 async function synthesize(text, voice, model, httpRes, format) {
