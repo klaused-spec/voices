@@ -47,24 +47,52 @@ const agent = new https.Agent({
   maxSockets: 20, maxFreeSockets: 5,
 });
 
-// ─── Cache LRU em memória ───────────────────────────────────
-const cache = new Map();
+// ─── Cache: memória + disco (persiste entre reinícios) ──────
+const fs = require('fs');
+const path = require('path');
+const CACHE_DIR = process.env.CACHE_DIR || path.join(__dirname, 'cache');
+const memCache = new Map();
+
+// Cria pasta de cache na inicialização
+try { fs.mkdirSync(CACHE_DIR, { recursive: true }); } catch {}
 
 function cacheKey(text, voice, model) {
   return crypto.createHash('md5').update(`${text}|${voice}|${model}`).digest('hex');
 }
 
+function cachePath(key) {
+  const sub = path.join(CACHE_DIR, key.slice(0, 2));
+  try { fs.mkdirSync(sub, { recursive: true }); } catch {}
+  return path.join(sub, key + '.pcm');
+}
+
 function cacheGet(key) {
-  const e = cache.get(key);
-  if (!e) return null;
-  if (Date.now() - e.ts > CACHE_TTL_MS) { cache.delete(key); return null; }
-  cache.delete(key); cache.set(key, e);
-  return e.pcm;
+  // Tenta memória primeiro
+  const e = memCache.get(key);
+  if (e) {
+    if (Date.now() - e.ts > CACHE_TTL_MS) { memCache.delete(key); }
+    else { memCache.delete(key); memCache.set(key, e); return e.pcm; }
+  }
+  // Tenta disco
+  const fp = cachePath(key);
+  try {
+    const stat = fs.statSync(fp);
+    if (Date.now() - stat.mtimeMs > CACHE_TTL_MS) { fs.unlinkSync(fp); return null; }
+    const pcm = fs.readFileSync(fp);
+    // Promove pra memória
+    if (memCache.size >= MAX_CACHE_ENTRIES) memCache.delete(memCache.keys().next().value);
+    memCache.set(key, { pcm, ts: stat.mtimeMs });
+    return pcm;
+  } catch { return null; }
 }
 
 function cacheSet(key, pcm) {
-  if (cache.size >= MAX_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
-  cache.set(key, { pcm, ts: Date.now() });
+  // Salva em memória
+  if (memCache.size >= MAX_CACHE_ENTRIES) memCache.delete(memCache.keys().next().value);
+  memCache.set(key, { pcm, ts: Date.now() });
+  // Salva em disco (async, não bloqueia)
+  const fp = cachePath(key);
+  fs.writeFile(fp, pcm, () => {});
 }
 
 // ─── WAV header ─────────────────────────────────────────────
@@ -366,7 +394,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && (path === '/health' || path === '/')) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ status: 'ok', mode: GEMINI_MODE, keys: keys.length, cached: cache.size }));
+    return res.end(JSON.stringify({ status: 'ok', mode: GEMINI_MODE, keys: keys.length, memCached: memCache.size }));
   }
 
   if (req.method === 'GET' && path === '/v1/voices') {
