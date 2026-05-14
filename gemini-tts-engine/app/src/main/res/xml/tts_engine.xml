@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Metadados do engine TTS — atividade de configuração -->
+<tts-engine xmlns:android="http://schemas.android.com/apk/res/android"
+    android:settingsActivity="dev.kkirner.geminitts.SettingsActivity" />

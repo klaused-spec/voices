@@ -1,6 +1,6 @@
 // Gemini TTS Streaming Proxy — Node.js
-// Usa streamGenerateContent (SSE) para reduzir TTFB e delay entre parágrafos.
-// Cache em memória + connection pooling + key rotation.
+// Modo LIVE (WebSocket) para streaming real de áudio com TTFB baixo.
+// Fallback para streamGenerateContent (HTTP SSE).
 
 require('dotenv').config();
 
@@ -8,12 +8,15 @@ const http = require('http');
 const https = require('https');
 const crypto = require('crypto');
 const { URL } = require('url');
+const WebSocket = require('ws');
 
 // ─── Configuração ───────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || '3100');
 const AUTH_TOKEN = process.env.AUTH_TOKEN || '';
 const DEFAULT_VOICE = process.env.DEFAULT_VOICE || 'Kore';
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'gemini-2.5-flash-preview-tts';
+const LIVE_MODEL = process.env.LIVE_MODEL || 'gemini-2.0-flash-live-001';
+const GEMINI_MODE = process.env.GEMINI_MODE || 'live'; // 'live' ou 'stream'
 const CACHE_TTL_MS = parseInt(process.env.CACHE_TTL || String(86400 * 7)) * 1000;
 const MAX_CACHE_ENTRIES = parseInt(process.env.MAX_CACHE_ENTRIES || '500');
 
@@ -26,10 +29,10 @@ for (let i = 1; i <= 10; i++) {
 }
 const keys = [...new Set(apiKeys)];
 if (keys.length === 0) {
-  console.error('Nenhuma API key configurada. Defina GEMINI_API_KEY ou GEMINI_KEY_1..10 no .env');
+  console.error('Nenhuma API key configurada.');
   process.exit(1);
 }
-console.log(`[init] ${keys.length} API key(s) carregada(s)`);
+console.log(`[init] ${keys.length} API key(s), modo: ${GEMINI_MODE}`);
 
 // ─── Vozes OpenAI → Gemini ──────────────────────────────────
 const voiceMap = {
@@ -37,18 +40,16 @@ const voiceMap = {
   onyx: 'Enceladus', nova: 'Zephyr', shimmer: 'Sulafat',
 };
 
-// ─── HTTPS Agent com keep-alive (reutiliza conexão TLS) ─────
+// ─── HTTPS Agent com keep-alive ─────────────────────────────
 const agent = new https.Agent({
-  keepAlive: true,
-  keepAliveMsecs: 30000,
-  maxSockets: 20,
-  maxFreeSockets: 5,
+  keepAlive: true, keepAliveMsecs: 30000,
+  maxSockets: 20, maxFreeSockets: 5,
 });
 
 // ─── Cache LRU em memória ───────────────────────────────────
 const cache = new Map();
 
-function ck(text, voice, model) {
+function cacheKey(text, voice, model) {
   return crypto.createHash('md5').update(`${text}|${voice}|${model}`).digest('hex');
 }
 
@@ -56,14 +57,12 @@ function cacheGet(key) {
   const e = cache.get(key);
   if (!e) return null;
   if (Date.now() - e.ts > CACHE_TTL_MS) { cache.delete(key); return null; }
-  cache.delete(key); cache.set(key, e); // LRU bump
+  cache.delete(key); cache.set(key, e);
   return e.pcm;
 }
 
 function cacheSet(key, pcm) {
-  if (cache.size >= MAX_CACHE_ENTRIES) {
-    cache.delete(cache.keys().next().value);
-  }
+  if (cache.size >= MAX_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
   cache.set(key, { pcm, ts: Date.now() });
 }
 
@@ -87,16 +86,109 @@ function wavHeader(pcmSize) {
   return buf;
 }
 
-// ─── Hash simples para round-robin ──────────────────────────
 function hashCode(s) {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
   return Math.abs(h);
 }
 
-// ─── Streaming do Gemini via SSE ────────────────────────────
-// Retorna { pcm: Buffer } e escreve chunks no httpRes conforme chegam
-function streamFromGemini(text, voice, model, apiKey, httpRes, format) {
+// ═══════════════════════════════════════════════════════════════
+// MODO LIVE — WebSocket para streaming real de áudio
+// ═══════════════════════════════════════════════════════════════
+
+function synthesizeLive(text, voice, apiKey, httpRes, format) {
+  return new Promise((resolve, reject) => {
+    const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+    const ws = new WebSocket(wsUrl);
+
+    const chunks = [];
+    let headerSent = false;
+    let resolved = false;
+
+    const timeout = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        try { ws.close(); } catch {}
+        reject({ code: 504, body: 'Timeout (60s)' });
+      }
+    }, 60000);
+
+    function finish(err) {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeout);
+      try { ws.close(); } catch {}
+      if (err) return reject(err);
+      if (chunks.length > 0) resolve(Buffer.concat(chunks));
+      else reject({ code: 502, body: 'Resposta sem áudio' });
+    }
+
+    ws.on('open', () => {
+      ws.send(JSON.stringify({
+        setup: {
+          model: `models/${LIVE_MODEL}`,
+          generationConfig: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: voice }
+              }
+            }
+          }
+        }
+      }));
+    });
+
+    ws.on('message', (raw) => {
+      let msg;
+      try { msg = JSON.parse(raw.toString()); } catch { return; }
+
+      if (msg.setupComplete) {
+        ws.send(JSON.stringify({
+          clientContent: {
+            turns: [{ role: 'user', parts: [{ text }] }],
+            turnComplete: true
+          }
+        }));
+        return;
+      }
+
+      if (msg.serverContent) {
+        const parts = msg.serverContent.modelTurn?.parts || [];
+        for (const part of parts) {
+          const b64 = part.inlineData?.data;
+          if (!b64) continue;
+          const pcm = Buffer.from(b64, 'base64');
+          chunks.push(pcm);
+
+          if (httpRes && !httpRes.writableEnded) {
+            if (!headerSent) {
+              if (format === 'pcm') {
+                httpRes.writeHead(200, { 'Content-Type': 'audio/pcm' });
+              } else {
+                httpRes.writeHead(200, { 'Content-Type': 'audio/wav' });
+                httpRes.write(wavHeader(0x7FFFFF00));
+              }
+              headerSent = true;
+            }
+            httpRes.write(pcm);
+          }
+        }
+
+        if (msg.serverContent.turnComplete) finish(null);
+      }
+    });
+
+    ws.on('error', (err) => finish({ code: 500, body: err.message }));
+    ws.on('close', () => finish(null));
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MODO STREAM — HTTP SSE (streamGenerateContent) — fallback
+// ═══════════════════════════════════════════════════════════════
+
+function synthesizeStream(text, voice, model, apiKey, httpRes, format) {
   return new Promise((resolve, reject) => {
     const u = new URL(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`
@@ -112,12 +204,10 @@ function streamFromGemini(text, voice, model, apiKey, httpRes, format) {
     }), 'utf8');
 
     const req = https.request({
-      hostname: u.hostname,
-      path: u.pathname + u.search,
+      hostname: u.hostname, path: u.pathname + u.search,
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': payload.length },
-      agent,
-      timeout: 60000,
+      agent, timeout: 60000,
     }, (res) => {
       if (res.statusCode !== 200) {
         let body = '';
@@ -130,77 +220,44 @@ function streamFromGemini(text, voice, model, apiKey, httpRes, format) {
       let headerSent = false;
       let sseBuf = '';
 
+      function processSSE(block) {
+        for (const line of block.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          const d = line.slice(6).trim();
+          if (d === '[DONE]') continue;
+          try {
+            const j = JSON.parse(d);
+            const b64 = j?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+            if (!b64) continue;
+            const pcm = Buffer.from(b64, 'base64');
+            chunks.push(pcm);
+            if (httpRes && !httpRes.writableEnded) {
+              if (!headerSent) {
+                if (format === 'pcm') {
+                  httpRes.writeHead(200, { 'Content-Type': 'audio/pcm' });
+                } else {
+                  httpRes.writeHead(200, { 'Content-Type': 'audio/wav' });
+                  httpRes.write(wavHeader(0x7FFFFF00));
+                }
+                headerSent = true;
+              }
+              httpRes.write(pcm);
+            }
+          } catch {}
+        }
+      }
+
       res.on('data', (raw) => {
         sseBuf += raw.toString();
         const parts = sseBuf.split('\n\n');
-        sseBuf = parts.pop(); // fragmento incompleto
-
-        for (const part of parts) {
-          for (const line of part.split('\n')) {
-            if (!line.startsWith('data: ')) continue;
-            const d = line.slice(6).trim();
-            if (d === '[DONE]') continue;
-            try {
-              const j = JSON.parse(d);
-              const b64 = j?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-              if (!b64) continue;
-              const pcm = Buffer.from(b64, 'base64');
-              chunks.push(pcm);
-
-              // Streaming: envia o chunk pro cliente assim que chega
-              if (httpRes && !httpRes.writableEnded) {
-                if (!headerSent) {
-                  if (format === 'pcm') {
-                    httpRes.writeHead(200, { 'Content-Type': 'audio/pcm' });
-                  } else {
-                    // WAV header com tamanho grande — cliente lê até EOF
-                    httpRes.writeHead(200, { 'Content-Type': 'audio/wav' });
-                    httpRes.write(wavHeader(0x7FFFFF00));
-                  }
-                  headerSent = true;
-                }
-                httpRes.write(pcm);
-              }
-            } catch { /* ignora JSON malformado */ }
-          }
-        }
+        sseBuf = parts.pop();
+        for (const part of parts) processSSE(part);
       });
 
       res.on('end', () => {
-        // Processa resto do buffer SSE
-        if (sseBuf.trim()) {
-          for (const line of sseBuf.split('\n')) {
-            if (!line.startsWith('data: ')) continue;
-            const d = line.slice(6).trim();
-            if (d === '[DONE]') continue;
-            try {
-              const j = JSON.parse(d);
-              const b64 = j?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-              if (b64) {
-                const pcm = Buffer.from(b64, 'base64');
-                chunks.push(pcm);
-                if (httpRes && !httpRes.writableEnded) {
-                  if (!headerSent) {
-                    if (format === 'pcm') {
-                      httpRes.writeHead(200, { 'Content-Type': 'audio/pcm' });
-                    } else {
-                      httpRes.writeHead(200, { 'Content-Type': 'audio/wav' });
-                      httpRes.write(wavHeader(0x7FFFFF00));
-                    }
-                    headerSent = true;
-                  }
-                  httpRes.write(pcm);
-                }
-              }
-            } catch {}
-          }
-        }
-
-        if (chunks.length === 0) {
-          reject({ code: 502, body: 'Resposta sem áudio' });
-        } else {
-          resolve(Buffer.concat(chunks));
-        }
+        if (sseBuf.trim()) processSSE(sseBuf);
+        if (chunks.length > 0) resolve(Buffer.concat(chunks));
+        else reject({ code: 502, body: 'Resposta sem áudio' });
       });
 
       res.on('error', e => reject({ code: 500, body: e.message }));
@@ -213,12 +270,13 @@ function streamFromGemini(text, voice, model, apiKey, httpRes, format) {
   });
 }
 
-// ─── Síntese com fallback de keys e cache ───────────────────
+// ─── Orquestração: cache + key rotation ─────────────────────
 async function synthesize(text, voice, model, httpRes, format) {
-  const key = ck(text, voice, model);
+  const effectiveModel = GEMINI_MODE === 'live' ? LIVE_MODEL : model;
+  const key = cacheKey(text, voice, effectiveModel);
   const cached = cacheGet(key);
   if (cached) {
-    console.log(`[cache hit] ${text.slice(0, 40)}...`);
+    console.log(`[cache] "${text.slice(0, 40)}..."`);
     if (format === 'pcm') {
       httpRes.writeHead(200, { 'Content-Type': 'audio/pcm', 'Content-Length': cached.length });
       httpRes.end(cached);
@@ -239,35 +297,34 @@ async function synthesize(text, voice, model, httpRes, format) {
       const idx = (start + i) % keys.length;
       try {
         const t0 = Date.now();
-        const pcm = await streamFromGemini(text, voice, model, keys[idx], httpRes, format);
-        console.log(`[synth] ${Date.now() - t0}ms, key#${idx}, ${pcm.length}b, "${text.slice(0, 40)}..."`);
+        let pcm;
+        if (GEMINI_MODE === 'live') {
+          pcm = await synthesizeLive(text, voice, keys[idx], httpRes, format);
+        } else {
+          pcm = await synthesizeStream(text, voice, model, keys[idx], httpRes, format);
+        }
+        console.log(`[synth] ${Date.now() - t0}ms, key#${idx}, ${pcm.length}b, ${GEMINI_MODE}`);
         cacheSet(key, pcm);
-        // Streaming já escreveu no httpRes — só finaliza
         if (!httpRes.writableEnded) httpRes.end();
         return;
       } catch (err) {
         lastErr = err.body || err.message || String(err);
-        if (httpRes.headersSent) {
-          // Já começou a enviar, não dá pra retry
-          httpRes.end();
-          return;
-        }
+        if (httpRes.headersSent) { httpRes.end(); return; }
         if (err.code === 429) { console.log(`[429] key#${idx}`); continue; }
         if (err.code === 403) { console.log(`[403] key#${idx}`); all429 = false; continue; }
         all429 = false;
+        console.log(`[err] key#${idx}: ${lastErr.slice(0, 100)}`);
       }
     }
     if (all429 && retry < 2) {
-      console.log(`[retry] Todas 429, aguardando 3s...`);
+      console.log('[retry] Todas 429, aguardando 3s...');
       await new Promise(r => setTimeout(r, 3000));
-    } else {
-      break;
-    }
+    } else break;
   }
 
   if (!httpRes.headersSent) {
     httpRes.writeHead(502, { 'Content-Type': 'application/json' });
-    httpRes.end(JSON.stringify({ error: `Falha após tentar todas as keys. ${lastErr}` }));
+    httpRes.end(JSON.stringify({ error: `Falha: ${lastErr}` }));
   }
 }
 
@@ -286,25 +343,20 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const path = url.pathname.replace(/\/+$/, '') || '/';
 
-  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     });
-    res.end();
-    return;
+    return res.end();
   }
 
-  // Health check
   if (req.method === 'GET' && (path === '/health' || path === '/')) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', keys: keys.length, cached: cache.size }));
-    return;
+    return res.end(JSON.stringify({ status: 'ok', mode: GEMINI_MODE, keys: keys.length, cached: cache.size }));
   }
 
-  // Lista de vozes
   if (req.method === 'GET' && path === '/v1/voices') {
     const voices = [
       'Zephyr','Puck','Charon','Kore','Fenrir','Leda','Orus','Aoede',
@@ -314,42 +366,31 @@ const server = http.createServer(async (req, res) => {
       'Zubeneschamali','Achernar','Rasalgethi','Alnilam','Sirius',
     ];
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ voices: voices.map(v => ({ name: v, voice_id: v })) }));
-    return;
+    return res.end(JSON.stringify({ voices: voices.map(v => ({ name: v, voice_id: v })) }));
   }
 
-  // ─── Autenticação ─────────────────────────────────────────
   if (AUTH_TOKEN) {
     const hdr = (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '');
     const qry = url.searchParams.get('token') || '';
     if (hdr !== AUTH_TOKEN && qry !== AUTH_TOKEN) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Token inválido' }));
-      return;
+      return res.end(JSON.stringify({ error: 'Token inválido' }));
     }
   }
 
-  // ─── Leitura dos parâmetros ───────────────────────────────
   try {
     const rawBody = await readBody(req);
     const ct = req.headers['content-type'] || '';
     let data = {};
-
-    if (ct.includes('application/json')) {
-      try { data = JSON.parse(rawBody); } catch {}
-    } else if (rawBody.includes('=') && rawBody.includes('&')) {
-      data = Object.fromEntries(new URLSearchParams(rawBody));
-    }
+    if (ct.includes('application/json')) { try { data = JSON.parse(rawBody); } catch {} }
+    else if (rawBody.includes('=') && rawBody.includes('&')) { data = Object.fromEntries(new URLSearchParams(rawBody)); }
 
     let text = data.input || url.searchParams.get('input') || url.searchParams.get('text') || '';
-    if (!text && rawBody && !rawBody.includes('{') && !(rawBody.includes('=') && rawBody.includes('&'))) {
-      text = rawBody;
-    }
+    if (!text && rawBody && !rawBody.includes('{') && !(rawBody.includes('=') && rawBody.includes('&'))) text = rawBody;
 
     if (!text.trim()) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Texto vazio' }));
-      return;
+      return res.end(JSON.stringify({ error: 'Texto vazio' }));
     }
 
     const voiceKey = data.voice || url.searchParams.get('voice') || DEFAULT_VOICE;
@@ -358,12 +399,9 @@ const server = http.createServer(async (req, res) => {
     const format = data.response_format || url.searchParams.get('format') || 'wav';
 
     let model = DEFAULT_MODEL;
-    if (modelHint.includes('pro') || modelHint.includes('hd')) {
-      model = 'gemini-2.5-pro-preview-tts';
-    }
+    if (modelHint.includes('pro') || modelHint.includes('hd')) model = 'gemini-2.5-pro-preview-tts';
 
     await synthesize(text, voice, model, res, format);
-
   } catch (err) {
     if (!res.headersSent) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -373,11 +411,9 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`[init] Gemini TTS streaming proxy em http://localhost:${PORT}`);
-  console.log(`[init] Modelo padrão: ${DEFAULT_MODEL}`);
-  console.log(`[init] Voz padrão: ${DEFAULT_VOICE}`);
+  console.log(`[init] Gemini TTS proxy em http://localhost:${PORT}`);
+  console.log(`[init] Modo: ${GEMINI_MODE} | Modelo: ${GEMINI_MODE === 'live' ? LIVE_MODEL : DEFAULT_MODEL} | Voz: ${DEFAULT_VOICE}`);
 });
 
-// Graceful shutdown
 process.on('SIGTERM', () => { server.close(); agent.destroy(); });
 process.on('SIGINT', () => { server.close(); agent.destroy(); process.exit(0); });
