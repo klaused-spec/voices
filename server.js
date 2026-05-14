@@ -17,7 +17,7 @@ const DEFAULT_VOICE = process.env.DEFAULT_VOICE || 'Kore';
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || 'gemini-2.5-flash-preview-tts';
 const LIVE_MODEL = process.env.LIVE_MODEL || 'gemini-2.0-flash-live-001';
 const LIVE_SYSTEM = 'Você é um leitor de texto. Leia o texto do usuário em voz alta, exatamente como escrito, sem comentários adicionais.';
-const GEMINI_MODE = process.env.GEMINI_MODE || 'live'; // 'live' ou 'stream'
+const GEMINI_MODE = process.env.GEMINI_MODE || 'stream'; // 'live' ou 'stream'
 const CACHE_TTL_MS = parseInt(process.env.CACHE_TTL || String(86400 * 7)) * 1000;
 const MAX_CACHE_ENTRIES = parseInt(process.env.MAX_CACHE_ENTRIES || '500');
 
@@ -146,6 +146,14 @@ function synthesizeLive(text, voice, apiKey, httpRes, format) {
     ws.on('message', (raw) => {
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
+
+      // Debug: loga as mensagens do WebSocket
+      const keys = Object.keys(msg);
+      console.log(`[live-ws] msg keys: ${keys.join(', ')}`);
+      if (msg.serverContent?.modelTurn?.parts) {
+        const partTypes = msg.serverContent.modelTurn.parts.map(p => p.inlineData ? 'audio' : p.text ? 'text' : 'unknown');
+        console.log(`[live-ws] parts: ${partTypes.join(', ')}`);
+      }
 
       if (msg.setupComplete) {
         ws.send(JSON.stringify({
