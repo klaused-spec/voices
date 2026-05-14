@@ -50,14 +50,21 @@ const agent = new https.Agent({
 // ─── Cache: memória + disco (persiste entre reinícios) ──────
 const fs = require('fs');
 const path = require('path');
-const CACHE_DIR = process.env.CACHE_DIR || path.join(__dirname, 'cache');
+// Cache FORA da pasta de deploy pra sobreviver a re-deploys
+const CACHE_DIR = process.env.CACHE_DIR || path.join(require('os').homedir(), '.gemini-tts-cache');
 const memCache = new Map();
 
 // Cria pasta de cache na inicialização
 try { fs.mkdirSync(CACHE_DIR, { recursive: true }); } catch {}
+console.log(`[init] Cache dir: ${CACHE_DIR}`);
+
+// Normaliza texto pra evitar cache miss por diferença de espaço/quebra de linha
+function normalizeText(text) {
+  return text.trim().replace(/\r\n/g, '\n').replace(/[ \t]+/g, ' ').replace(/\n{2,}/g, '\n');
+}
 
 function cacheKey(text, voice, model) {
-  return crypto.createHash('md5').update(`${text}|${voice}|${model}`).digest('hex');
+  return crypto.createHash('md5').update(`${normalizeText(text)}|${voice}|${model}`).digest('hex');
 }
 
 function cachePath(key) {
@@ -79,6 +86,7 @@ function cacheGet(key) {
     const stat = fs.statSync(fp);
     if (Date.now() - stat.mtimeMs > CACHE_TTL_MS) { fs.unlinkSync(fp); return null; }
     const pcm = fs.readFileSync(fp);
+    console.log(`[disk-cache hit] ${key.slice(0, 8)}... ${pcm.length}b`);
     // Promove pra memória
     if (memCache.size >= MAX_CACHE_ENTRIES) memCache.delete(memCache.keys().next().value);
     memCache.set(key, { pcm, ts: stat.mtimeMs });
@@ -92,7 +100,10 @@ function cacheSet(key, pcm) {
   memCache.set(key, { pcm, ts: Date.now() });
   // Salva em disco (async, não bloqueia)
   const fp = cachePath(key);
-  fs.writeFile(fp, pcm, () => {});
+  fs.writeFile(fp, pcm, (err) => {
+    if (err) console.log(`[cache-write err] ${err.message}`);
+    else console.log(`[disk-cache set] ${key.slice(0, 8)}... ${pcm.length}b`);
+  });
 }
 
 // ─── WAV header ─────────────────────────────────────────────
