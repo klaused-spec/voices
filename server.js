@@ -321,26 +321,8 @@ function synthesizeStream(text, voice, model, apiKey, httpRes, format) {
   });
 }
 
-// ─── Orquestração: cache + key rotation ─────────────────────
-async function synthesize(text, voice, model, httpRes, format) {
-  const effectiveModel = GEMINI_MODE === 'live' ? LIVE_MODEL : model;
-  const key = cacheKey(text, voice, effectiveModel);
-  const cached = cacheGet(key);
-  if (cached) {
-    console.log(`[CACHE HIT] "${normalizeText(text).slice(0, 60)}" → ${cached.length}b`);
-    if (format === 'pcm') {
-      httpRes.writeHead(200, { 'Content-Type': 'audio/pcm', 'Content-Length': cached.length, 'X-Cache': 'HIT' });
-      httpRes.end(cached);
-    } else {
-      const wav = Buffer.concat([wavHeader(cached.length), cached]);
-      httpRes.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length, 'X-Cache': 'HIT' });
-      httpRes.end(wav);
-    }
-    return;
-  }
-
-  console.log(`[CACHE MISS] "${normalizeText(text).slice(0, 60)}"`);
-
+// ─── Tenta sintetizar com um modelo específico ─────────────
+async function tryModel(text, voice, model, httpRes, format) {
   const start = hashCode(text) % keys.length;
   let lastErr = '';
 
@@ -356,29 +338,100 @@ async function synthesize(text, voice, model, httpRes, format) {
         } else {
           pcm = await synthesizeStream(text, voice, model, keys[idx], httpRes, format);
         }
-        console.log(`[synth] ${Date.now() - t0}ms, key#${idx}, ${pcm.length}b, ${GEMINI_MODE}`);
-        cacheSet(key, pcm);
-        if (!httpRes.writableEnded) httpRes.end();
-        return;
+        console.log(`[synth] ${Date.now() - t0}ms, key#${idx}, ${pcm.length}b, model=${model}`);
+        return pcm;
       } catch (err) {
         lastErr = err.body || err.message || String(err);
-        if (httpRes.headersSent) { httpRes.end(); return; }
-        if (err.code === 429) { console.log(`[429] key#${idx}`); continue; }
+        if (httpRes.headersSent) throw err;
+        if (err.code === 429) { console.log(`[429] key#${idx} model=${model}`); continue; }
         if (err.code === 403) { console.log(`[403] key#${idx}`); all429 = false; continue; }
         all429 = false;
         console.log(`[err] key#${idx}: ${lastErr.slice(0, 100)}`);
       }
     }
     if (all429 && retry < 2) {
-      console.log('[retry] Todas 429, aguardando 3s...');
+      console.log(`[retry] Todas 429 em ${model}, aguardando 3s...`);
       await new Promise(r => setTimeout(r, 3000));
     } else break;
   }
+  throw { code: 429, body: lastErr };
+}
 
-  if (!httpRes.headersSent) {
-    httpRes.writeHead(502, { 'Content-Type': 'application/json' });
-    httpRes.end(JSON.stringify({ error: `Falha: ${lastErr}` }));
+// ─── Modelo fallback quando TTS esgota quota ────────────────
+const FALLBACK_MODEL = process.env.FALLBACK_MODEL || 'gemini-2.0-flash';
+
+async function synthesize(text, voice, model, httpRes, format) {
+  const effectiveModel = GEMINI_MODE === 'live' ? LIVE_MODEL : model;
+
+  // Tenta cache do modelo principal
+  const key1 = cacheKey(text, voice, effectiveModel);
+  const cached1 = cacheGet(key1);
+  if (cached1) {
+    console.log(`[CACHE HIT] "${normalizeText(text).slice(0, 60)}" → ${cached1.length}b`);
+    const hdr = { 'X-Cache': 'HIT', 'X-Model': effectiveModel };
+    if (format === 'pcm') {
+      httpRes.writeHead(200, { 'Content-Type': 'audio/pcm', 'Content-Length': cached1.length, ...hdr });
+      httpRes.end(cached1);
+    } else {
+      const wav = Buffer.concat([wavHeader(cached1.length), cached1]);
+      httpRes.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length, ...hdr });
+      httpRes.end(wav);
+    }
+    return;
   }
+
+  // Tenta cache do fallback
+  const key2 = cacheKey(text, voice, FALLBACK_MODEL);
+  const cached2 = cacheGet(key2);
+  if (cached2) {
+    console.log(`[CACHE HIT fallback] "${normalizeText(text).slice(0, 60)}" → ${cached2.length}b`);
+    const hdr = { 'X-Cache': 'HIT', 'X-Model': FALLBACK_MODEL };
+    if (format === 'pcm') {
+      httpRes.writeHead(200, { 'Content-Type': 'audio/pcm', 'Content-Length': cached2.length, ...hdr });
+      httpRes.end(cached2);
+    } else {
+      const wav = Buffer.concat([wavHeader(cached2.length), cached2]);
+      httpRes.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length, ...hdr });
+      httpRes.end(wav);
+    }
+    return;
+  }
+
+  console.log(`[CACHE MISS] "${normalizeText(text).slice(0, 60)}"`);
+
+  // Tenta modelo principal
+  let pcm, usedModel;
+  try {
+    pcm = await tryModel(text, voice, effectiveModel, httpRes, format);
+    usedModel = effectiveModel;
+  } catch (err) {
+    if (httpRes.headersSent) { httpRes.end(); return; }
+    // Fallback para gemini-2.0-flash
+    if (effectiveModel !== FALLBACK_MODEL) {
+      console.log(`[fallback] ${effectiveModel} esgotado, tentando ${FALLBACK_MODEL}...`);
+      try {
+        pcm = await tryModel(text, voice, FALLBACK_MODEL, httpRes, format);
+        usedModel = FALLBACK_MODEL;
+      } catch (err2) {
+        if (!httpRes.headersSent) {
+          httpRes.writeHead(502, { 'Content-Type': 'application/json' });
+          httpRes.end(JSON.stringify({ error: `Falha em ambos modelos. ${err2.body || err2.message}` }));
+        }
+        return;
+      }
+    } else {
+      if (!httpRes.headersSent) {
+        httpRes.writeHead(502, { 'Content-Type': 'application/json' });
+        httpRes.end(JSON.stringify({ error: `Falha: ${err.body || err.message}` }));
+      }
+      return;
+    }
+  }
+
+  // Cacheia e finaliza
+  const ckey = cacheKey(text, voice, usedModel);
+  cacheSet(ckey, pcm);
+  if (!httpRes.writableEnded) httpRes.end();
 }
 
 // ─── Leitura do body HTTP ───────────────────────────────────
