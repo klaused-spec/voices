@@ -358,7 +358,12 @@ async function tryModel(text, voice, model, httpRes, format) {
 }
 
 // ─── Modelo fallback quando TTS esgota quota ────────────────
-const FALLBACK_MODEL = process.env.FALLBACK_MODEL || 'gemini-2.0-flash';
+const FALLBACK_MODEL = process.env.FALLBACK_MODEL || 'gemini-2.5-flash-preview-tts';
+const FALLBACK_MODELS = [
+  'gemini-2.5-flash-preview-tts',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+];
 
 async function synthesize(text, voice, model, httpRes, format) {
   const effectiveModel = GEMINI_MODE === 'live' ? LIVE_MODEL : model;
@@ -399,33 +404,29 @@ async function synthesize(text, voice, model, httpRes, format) {
 
   console.log(`[CACHE MISS] "${normalizeText(text).slice(0, 60)}"`);
 
-  // Tenta modelo principal
-  let pcm, usedModel;
-  try {
-    pcm = await tryModel(text, voice, effectiveModel, httpRes, format);
-    usedModel = effectiveModel;
-  } catch (err) {
+  // Tenta modelo principal, depois fallbacks em sequência
+  const modelsToTry = [effectiveModel, ...FALLBACK_MODELS.filter(m => m !== effectiveModel)];
+  let pcm, usedModel, lastErr;
+
+  for (const m of modelsToTry) {
     if (httpRes.headersSent) { httpRes.end(); return; }
-    // Fallback para gemini-2.0-flash
-    if (effectiveModel !== FALLBACK_MODEL) {
-      console.log(`[fallback] ${effectiveModel} esgotado, tentando ${FALLBACK_MODEL}...`);
-      try {
-        pcm = await tryModel(text, voice, FALLBACK_MODEL, httpRes, format);
-        usedModel = FALLBACK_MODEL;
-      } catch (err2) {
-        if (!httpRes.headersSent) {
-          httpRes.writeHead(502, { 'Content-Type': 'application/json' });
-          httpRes.end(JSON.stringify({ error: `Falha em ambos modelos. ${err2.body || err2.message}` }));
-        }
-        return;
-      }
-    } else {
-      if (!httpRes.headersSent) {
-        httpRes.writeHead(502, { 'Content-Type': 'application/json' });
-        httpRes.end(JSON.stringify({ error: `Falha: ${err.body || err.message}` }));
-      }
-      return;
+    try {
+      console.log(`[try] modelo: ${m}`);
+      pcm = await tryModel(text, voice, m, httpRes, format);
+      usedModel = m;
+      break;
+    } catch (err) {
+      lastErr = err.body || err.message || String(err);
+      console.log(`[fail] ${m}: ${String(lastErr).slice(0, 80)}`);
     }
+  }
+
+  if (!pcm) {
+    if (!httpRes.headersSent) {
+      httpRes.writeHead(502, { 'Content-Type': 'application/json' });
+      httpRes.end(JSON.stringify({ error: `Todos modelos falharam. ${lastErr}` }));
+    }
+    return;
   }
 
   // Cacheia e finaliza
