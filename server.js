@@ -327,17 +327,19 @@ async function synthesize(text, voice, model, httpRes, format) {
   const key = cacheKey(text, voice, effectiveModel);
   const cached = cacheGet(key);
   if (cached) {
-    console.log(`[cache] "${text.slice(0, 40)}..."`);
+    console.log(`[CACHE HIT] "${normalizeText(text).slice(0, 60)}" → ${cached.length}b`);
     if (format === 'pcm') {
-      httpRes.writeHead(200, { 'Content-Type': 'audio/pcm', 'Content-Length': cached.length });
+      httpRes.writeHead(200, { 'Content-Type': 'audio/pcm', 'Content-Length': cached.length, 'X-Cache': 'HIT' });
       httpRes.end(cached);
     } else {
       const wav = Buffer.concat([wavHeader(cached.length), cached]);
-      httpRes.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length });
+      httpRes.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length, 'X-Cache': 'HIT' });
       httpRes.end(wav);
     }
     return;
   }
+
+  console.log(`[CACHE MISS] "${normalizeText(text).slice(0, 60)}"`);
 
   const start = hashCode(text) % keys.length;
   let lastErr = '';
