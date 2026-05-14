@@ -384,21 +384,24 @@ async function synthesize(text, voice, model, httpRes, format) {
     return;
   }
 
-  // Tenta cache do fallback
-  const key2 = cacheKey(text, voice, FALLBACK_MODEL);
-  const cached2 = cacheGet(key2);
-  if (cached2) {
-    console.log(`[CACHE HIT fallback] "${normalizeText(text).slice(0, 60)}" → ${cached2.length}b`);
-    const hdr = { 'X-Cache': 'HIT', 'X-Model': FALLBACK_MODEL };
-    if (format === 'pcm') {
-      httpRes.writeHead(200, { 'Content-Type': 'audio/pcm', 'Content-Length': cached2.length, ...hdr });
-      httpRes.end(cached2);
-    } else {
-      const wav = Buffer.concat([wavHeader(cached2.length), cached2]);
-      httpRes.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length, ...hdr });
-      httpRes.end(wav);
+  // Tenta cache dos modelos fallback
+  for (const fb of FALLBACK_MODELS) {
+    if (fb === effectiveModel) continue;
+    const key2 = cacheKey(text, voice, fb);
+    const cached2 = cacheGet(key2);
+    if (cached2) {
+      console.log(`[CACHE HIT fallback] "${normalizeText(text).slice(0, 60)}" → ${cached2.length}b`);
+      const hdr = { 'X-Cache': 'HIT', 'X-Model': fb };
+      if (format === 'pcm') {
+        httpRes.writeHead(200, { 'Content-Type': 'audio/pcm', 'Content-Length': cached2.length, ...hdr });
+        httpRes.end(cached2);
+      } else {
+        const wav = Buffer.concat([wavHeader(cached2.length), cached2]);
+        httpRes.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length, ...hdr });
+        httpRes.end(wav);
+      }
+      return;
     }
-    return;
   }
 
   console.log(`[CACHE MISS] "${normalizeText(text).slice(0, 60)}"`);
