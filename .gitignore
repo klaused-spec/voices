@@ -1,0 +1,6 @@
+.env
+.env.php
+node_modules/
+cache/
+*.pyc
+__pycache__/

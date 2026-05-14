@@ -1,0 +1,16 @@
+{
+  "name": "gemini-tts-node",
+  "version": "1.0.0",
+  "description": "Proxy Gemini TTS com streaming — reduz delay entre parágrafos",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
