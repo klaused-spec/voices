@@ -5,3 +5,11 @@ cache/
 *.pyc
 __pycache__/
 .venv/
+
+# Outros projetos (ficam só local)
+gemini-tts-engine/
+gemini-tts-php/
+gemini-tts-plugin.js
+gemini_tts_proxy.py
+GUIA_VOZES_PT_BR.md
+*.wav

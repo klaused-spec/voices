@@ -1,6 +1,0 @@
-<resources>
-    <string name="app_name">Gemini TTS</string>
-    <string name="pref_api_key">gemini_api_key</string>
-    <string name="pref_voice">gemini_voice</string>
-    <string name="pref_model">gemini_model</string>
-</resources>
