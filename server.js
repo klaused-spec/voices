@@ -364,6 +364,98 @@ const FALLBACK_MODELS = [
   'gemini-2.5-pro-preview-tts',
 ];
 
+// ═══════════════════════════════════════════════════════════════
+// EDGE TTS — Microsoft Neural TTS (grátis, ilimitado)
+// Fallback final quando toda a quota Gemini esgota
+// ═══════════════════════════════════════════════════════════════
+const EDGE_TTS_TOKEN = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
+const EDGE_TTS_ORIGIN = 'chrome-extension://jdiccldimpdaibmpdmdber';
+const EDGE_TTS_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0';
+
+// Mapeamento Gemini voice → Edge TTS pt-BR voice
+const edgeVoiceMap = {
+  // Femininas
+  Kore: 'pt-BR-FranciscaNeural',
+  Aoede: 'pt-BR-ThalitaNeural',
+  Leda: 'pt-BR-LeticiaNeural',
+  Zephyr: 'pt-BR-FranciscaNeural',
+  Sulafat: 'pt-BR-ThalitaNeural',
+  // Masculinas
+  Puck: 'pt-BR-AntonioNeural',
+  Charon: 'pt-BR-AntonioNeural',
+  Fenrir: 'pt-BR-AntonioNeural',
+  Orus: 'pt-BR-AntonioNeural',
+  Enceladus: 'pt-BR-AntonioNeural',
+};
+const EDGE_DEFAULT_VOICE = 'pt-BR-FranciscaNeural';
+
+function synthesizeEdgeTTS(text, voice) {
+  return new Promise((resolve, reject) => {
+    const reqId = crypto.randomBytes(16).toString('hex');
+    const edgeVoice = edgeVoiceMap[voice] || EDGE_DEFAULT_VOICE;
+    const outputFormat = 'raw-24khz-16bit-mono-pcm';
+
+    const wsUrl = `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${EDGE_TTS_TOKEN}&ConnectionId=${reqId}`;
+
+    const ws = new WebSocket(wsUrl, {
+      headers: {
+        'Origin': EDGE_TTS_ORIGIN,
+        'User-Agent': EDGE_TTS_UA,
+      }
+    });
+
+    const chunks = [];
+    let resolved = false;
+    const timeout = setTimeout(() => {
+      if (!resolved) { resolved = true; try { ws.close(); } catch {} reject({ code: 504, body: 'Edge TTS timeout' }); }
+    }, 30000);
+
+    ws.on('open', () => {
+      // Configura formato de saída
+      ws.send(`Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"},"outputFormat":"${outputFormat}"}}}}`);
+
+      // Envia SSML
+      const ssml = `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='pt-BR'><voice name='${edgeVoice}'><prosody rate='+0%' pitch='+0Hz'>${escapeXml(text)}</prosody></voice></speak>`;
+      ws.send(`X-RequestId:${reqId}\r\nContent-Type:application/ssml+xml\r\nPath:ssml\r\n\r\n${ssml}`);
+    });
+
+    ws.on('message', (data, isBinary) => {
+      if (isBinary && Buffer.isBuffer(data)) {
+        // Header binário: 2 bytes tamanho do header + header text + dados PCM
+        const headerLen = data.readUInt16BE(0);
+        const pcm = data.slice(2 + headerLen);
+        if (pcm.length > 0) chunks.push(pcm);
+      } else {
+        const msg = data.toString();
+        if (msg.includes('Path:turn.end')) {
+          resolved = true;
+          clearTimeout(timeout);
+          try { ws.close(); } catch {}
+          if (chunks.length > 0) resolve(Buffer.concat(chunks));
+          else reject({ code: 502, body: 'Edge TTS: sem áudio' });
+        }
+      }
+    });
+
+    ws.on('error', (err) => {
+      if (!resolved) { resolved = true; clearTimeout(timeout); reject({ code: 500, body: `Edge TTS: ${err.message}` }); }
+    });
+
+    ws.on('close', () => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timeout);
+        if (chunks.length > 0) resolve(Buffer.concat(chunks));
+        else reject({ code: 502, body: 'Edge TTS: conexão fechada sem áudio' });
+      }
+    });
+  });
+}
+
+function escapeXml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
 async function synthesize(text, voice, model, httpRes, format) {
   const effectiveModel = GEMINI_MODE === 'live' ? LIVE_MODEL : model;
 
@@ -384,8 +476,9 @@ async function synthesize(text, voice, model, httpRes, format) {
     return;
   }
 
-  // Tenta cache dos modelos fallback
-  for (const fb of FALLBACK_MODELS) {
+  // Tenta cache dos modelos fallback (inclui edge-tts)
+  const allModels = [...FALLBACK_MODELS, 'edge-tts'];
+  for (const fb of allModels) {
     if (fb === effectiveModel) continue;
     const key2 = cacheKey(text, voice, fb);
     const cached2 = cacheGet(key2);
@@ -424,17 +517,42 @@ async function synthesize(text, voice, model, httpRes, format) {
   }
 
   if (!pcm) {
+    // Último recurso: Edge TTS (grátis, ilimitado)
     if (!httpRes.headersSent) {
-      httpRes.writeHead(502, { 'Content-Type': 'application/json' });
-      httpRes.end(JSON.stringify({ error: `Todos modelos falharam. ${lastErr}` }));
+      try {
+        console.log(`[try] Edge TTS (fallback final)`);
+        pcm = await synthesizeEdgeTTS(text, voice);
+        usedModel = 'edge-tts';
+        console.log(`[synth] Edge TTS ok, ${pcm.length}b`);
+      } catch (edgeErr) {
+        console.log(`[fail] Edge TTS: ${edgeErr.body || edgeErr.message || String(edgeErr)}`);
+        httpRes.writeHead(502, { 'Content-Type': 'application/json' });
+        httpRes.end(JSON.stringify({ error: `Todos modelos falharam (incl. Edge TTS). ${edgeErr.body || ''}` }));
+        return;
+      }
+    } else {
+      return;
     }
-    return;
   }
 
   // Cacheia e finaliza
   const ckey = cacheKey(text, voice, usedModel);
   cacheSet(ckey, pcm);
-  if (!httpRes.writableEnded) httpRes.end();
+
+  // Se Edge TTS (não fez streaming), envia resposta completa
+  if (!httpRes.headersSent) {
+    const hdr = { 'X-Cache': 'MISS', 'X-Model': usedModel };
+    if (format === 'pcm') {
+      httpRes.writeHead(200, { 'Content-Type': 'audio/pcm', 'Content-Length': pcm.length, ...hdr });
+      httpRes.end(pcm);
+    } else {
+      const wav = Buffer.concat([wavHeader(pcm.length), pcm]);
+      httpRes.writeHead(200, { 'Content-Type': 'audio/wav', 'Content-Length': wav.length, ...hdr });
+      httpRes.end(wav);
+    }
+  } else if (!httpRes.writableEnded) {
+    httpRes.end();
+  }
 }
 
 // ─── Leitura do body HTTP ───────────────────────────────────
@@ -461,7 +579,19 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
-  if (req.method === 'GET' && (path === '/health' || path === '/')) {
+  // ─── Frontend UI ─────────────────────────────────────────
+  if (req.method === 'GET' && (path === '/' || path === '/ui')) {
+    const htmlPath = require('path').join(__dirname, 'public', 'index.html');
+    try {
+      const html = fs.readFileSync(htmlPath, 'utf8');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      return res.end(html);
+    } catch {
+      res.writeHead(404); return res.end('UI not found');
+    }
+  }
+
+  if (req.method === 'GET' && path === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ status: 'ok', mode: GEMINI_MODE, keys: keys.length, memCached: memCache.size }));
   }
