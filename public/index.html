@@ -95,7 +95,7 @@ btn,.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;p
     <div>
       <div class="card">
         <label>Texto</label>
-        <textarea id="inputText" placeholder="Cole aqui o texto que deseja ouvir...&#10;&#10;Parágrafos são separados por linha em branco."></textarea>
+        <textarea id="inputText" placeholder="Cole aqui o texto que deseja ouvir...&#10;&#10;Dica: selecione um trecho antes de clicar 'Ver parágrafos' para ver só aquela parte."></textarea>
         <label class="pdf-drop" id="pdfDropLabel" title="Importar PDF">
           <input type="file" id="pdfInput" accept=".pdf" onchange="loadPdf(this)">
           <span>📄</span> <span id="pdfLabel">Importar PDF…</span>
@@ -131,7 +131,7 @@ btn,.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;p
         </div>
 
         <div class="actions">
-          <button class="btn btn-secondary" id="btnSplit" onclick="previewSplit()">&#128196; Ver parágrafos</button>
+          <button class="btn btn-secondary" id="btnSplit" onclick="previewSplit()" title="Se tiver texto selecionado no textarea, mostra só os parágrafos daquele trecho">&#128196; Ver parágrafos</button>
           <button class="btn btn-primary" id="btnPrefetch" onclick="startPrefetch()">&#9889; Prefetch selecionados</button>
           <button class="btn btn-primary" id="btnPlay" onclick="startPlay()" disabled>&#9654; Play</button>
           <button class="btn btn-secondary" onclick="resetAll()">&#10005; Limpar</button>
@@ -370,7 +370,12 @@ async function runWorker() {
 
 // ── Preview split ────────────────────────────────────────────
 function previewSplit() {
-  const text = document.getElementById('inputText').value;
+  const ta = document.getElementById('inputText');
+  // Usa seleção do textarea se houver, senão o texto inteiro
+  const start = ta.selectionStart;
+  const end   = ta.selectionEnd;
+  const text  = (start !== end) ? ta.value.slice(start, end) : ta.value;
+
   if (!text.trim()) return;
   const parts = splitParagraphs(text);
   if (!parts.length) return;
