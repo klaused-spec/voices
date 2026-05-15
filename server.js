@@ -644,6 +644,23 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  if (req.method === 'GET' && path === '/api/cache-list') {
+    // Lista hashes no disco para debug
+    const keys2 = [];
+    try {
+      for (const sub of fs.readdirSync(CACHE_DIR)) {
+        const subPath = path.join(CACHE_DIR, sub);
+        if (fs.statSync(subPath).isDirectory()) {
+          for (const f of fs.readdirSync(subPath)) {
+            if (f.endsWith('.pcm')) keys2.push(f.replace('.pcm',''));
+          }
+        }
+      }
+    } catch {}
+    res.writeHead(200, {'Content-Type':'application/json'});
+    return res.end(JSON.stringify({ count: keys2.length, keys: keys2 }));
+  }
+
   if (req.method === 'GET' && path === '/api/lookup') {
     return handleLookup(req, res, url);
   }
@@ -654,7 +671,15 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'GET' && path === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ status: 'ok', mode: GEMINI_MODE, keys: keys.length, memCached: memCache.size }));
+    // Conta arquivos no disco
+    let diskCached = 0;
+    try {
+      for (const sub of fs.readdirSync(CACHE_DIR)) {
+        const subPath = path.join(CACHE_DIR, sub);
+        if (fs.statSync(subPath).isDirectory()) diskCached += fs.readdirSync(subPath).length;
+      }
+    } catch {}
+    return res.end(JSON.stringify({ status: 'ok', mode: GEMINI_MODE, keys: keys.length, memCached: memCache.size, diskCached, cacheDir: CACHE_DIR }));
   }
 
   if (req.method === 'GET' && path === '/v1/voices') {
