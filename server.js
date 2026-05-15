@@ -61,7 +61,10 @@ console.log(`[init] Cache dir: ${CACHE_DIR}`);
 // Normaliza texto pra evitar cache miss por diferença de espaço/quebra de linha
 function normalizeText(text) {
   return text
-    .normalize('NFC')                    // unifica acentos (NFD do PDF vs NFC do Readera)
+    .normalize('NFKC')           // unifica acentos NFD/NFC + compatibilidade (ligaduras, largura)
+    .replace(/\u00AD/g, '')      // soft hyphen (invisível, quebra cache)
+    .replace(/[\u200B\u200C\u200D\uFEFF]/g, '') // zero-width spaces / BOM
+    .replace(/\u00A0/g, ' ')     // non-breaking space → espaço normal
     .trim()
     .replace(/\r\n/g, '\n')
     .replace(/[ \t]+/g, ' ')
