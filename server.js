@@ -467,11 +467,17 @@ function escapeXml(s) {
 async function synthesize(text, voice, model, httpRes, format) {
   const effectiveModel = GEMINI_MODE === 'live' ? LIVE_MODEL : model;
 
-  // Tenta cache do modelo principal
+  // Debug: mostra texto raw, normalizado e hash pra diagnosticar cache miss
+  const norm = normalizeText(text);
   const key1 = cacheKey(text, voice, effectiveModel);
+  const rawHex = Buffer.from(text.slice(0, 30)).toString('hex');
+  console.log(`[req] raw="${text.slice(0,60).replace(/\n/g,'↵')}" hex=${rawHex}`);
+  console.log(`[req] norm="${norm.slice(0,60)}" key=${key1.slice(0,8)} voice=${voice}`);
+
+  // Tenta cache do modelo principal
   const cached1 = cacheGet(key1);
   if (cached1) {
-    console.log(`[CACHE HIT] "${normalizeText(text).slice(0, 60)}" → ${cached1.length}b`);
+    console.log(`[CACHE HIT] "${norm.slice(0, 60)}" → ${cached1.length}b`);
     const hdr = { 'X-Cache': 'HIT', 'X-Model': effectiveModel };
     if (format === 'pcm') {
       httpRes.writeHead(200, { 'Content-Type': 'audio/pcm', 'Content-Length': cached1.length, ...hdr });
