@@ -467,18 +467,23 @@ function escapeXml(s) {
 async function synthesize(text, voice, model, httpRes, format) {
   const effectiveModel = GEMINI_MODE === 'live' ? LIVE_MODEL : model;
 
-  // Debug: mostra texto raw, normalizado e hash pra diagnosticar cache miss
   const norm = normalizeText(text);
   const key1 = cacheKey(text, voice, effectiveModel);
-  const rawHex = Buffer.from(text.slice(0, 30)).toString('hex');
-  console.log(`[req] raw="${text.slice(0,60).replace(/\n/g,'↵')}" hex=${rawHex}`);
-  console.log(`[req] norm="${norm.slice(0,60)}" key=${key1.slice(0,8)} voice=${voice}`);
+  console.log(`[req] len=${norm.length} hash=${key1} voice=${voice}`);
+  console.log(`[req] text="${norm.slice(0, 120).replace(/\n/g,'↵')}"`);
+
+  // Headers de debug — visíveis em qualquer cliente HTTP, sem truncamento de log
+  const debugHdr = {
+    'X-Cache-Key':  key1,
+    'X-Norm-Len':   String(norm.length),
+    'X-Norm-Text':  norm.slice(0, 200),   // primeiros 200 chars no header
+  };
 
   // Tenta cache do modelo principal
   const cached1 = cacheGet(key1);
   if (cached1) {
-    console.log(`[CACHE HIT] "${norm.slice(0, 60)}" → ${cached1.length}b`);
-    const hdr = { 'X-Cache': 'HIT', 'X-Model': effectiveModel };
+    console.log(`[CACHE HIT] hash=${key1} len=${norm.length}`);
+    const hdr = { 'X-Cache': 'HIT', 'X-Model': effectiveModel, ...debugHdr };
     if (format === 'pcm') {
       httpRes.writeHead(200, { 'Content-Type': 'audio/pcm', 'Content-Length': cached1.length, ...hdr });
       httpRes.end(cached1);
@@ -498,7 +503,7 @@ async function synthesize(text, voice, model, httpRes, format) {
     const cached2 = cacheGet(key2);
     if (cached2) {
       console.log(`[CACHE HIT fallback] "${normalizeText(text).slice(0, 60)}" → ${cached2.length}b`);
-      const hdr = { 'X-Cache': 'HIT', 'X-Model': fb };
+      const hdr = { 'X-Cache': 'HIT', 'X-Model': fb, ...debugHdr };
       if (format === 'pcm') {
         httpRes.writeHead(200, { 'Content-Type': 'audio/pcm', 'Content-Length': cached2.length, ...hdr });
         httpRes.end(cached2);
@@ -555,7 +560,7 @@ async function synthesize(text, voice, model, httpRes, format) {
 
   // Se Edge TTS (não fez streaming), envia resposta completa
   if (!httpRes.headersSent) {
-    const hdr = { 'X-Cache': 'MISS', 'X-Model': usedModel };
+    const hdr = { 'X-Cache': 'MISS', 'X-Model': usedModel, ...debugHdr };
     if (format === 'pcm') {
       httpRes.writeHead(200, { 'Content-Type': 'audio/pcm', 'Content-Length': pcm.length, ...hdr });
       httpRes.end(pcm);
@@ -577,6 +582,23 @@ function readBody(req) {
     req.on('end', () => resolve(Buffer.concat(bufs).toString('utf8')));
     req.on('error', reject);
   });
+}
+
+// ─── /api/lookup ─────────────────────────────────────────────
+// GET ?text=...&voice=...&model=... → diagnóstico completo de cache
+function handleLookup(req, res, url) {
+  const text  = url.searchParams.get('text')  || '';
+  const voice = url.searchParams.get('voice') || DEFAULT_VOICE;
+  const model = url.searchParams.get('model') || DEFAULT_MODEL;
+  const norm  = normalizeText(text);
+  const allModels = [GEMINI_MODE === 'live' ? LIVE_MODEL : model, ...FALLBACK_MODELS, 'edge-tts'];
+  const results = allModels.map(m => {
+    const k = cacheKey(text, voice, m);
+    const hit = cacheGet(k);
+    return { model: m, key: k, cached: !!hit, bytes: hit ? hit.length : 0 };
+  });
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ normLen: norm.length, norm, results }, null, 2));
 }
 
 // ─── /api/cache-check ───────────────────────────────────────
@@ -620,6 +642,10 @@ const server = http.createServer(async (req, res) => {
     } catch {
       res.writeHead(404); return res.end('UI not found');
     }
+  }
+
+  if (req.method === 'GET' && path === '/api/lookup') {
+    return handleLookup(req, res, url);
   }
 
   if (req.method === 'POST' && path === '/api/cache-check') {
