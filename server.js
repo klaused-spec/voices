@@ -60,7 +60,12 @@ console.log(`[init] Cache dir: ${CACHE_DIR}`);
 
 // Normaliza texto pra evitar cache miss por diferença de espaço/quebra de linha
 function normalizeText(text) {
-  return text.trim().replace(/\r\n/g, '\n').replace(/[ \t]+/g, ' ').replace(/\n{2,}/g, '\n');
+  return text
+    .normalize('NFC')                    // unifica acentos (NFD do PDF vs NFC do Readera)
+    .trim()
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{2,}/g, '\n');
 }
 
 function cacheKey(text, voice, model) {
