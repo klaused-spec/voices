@@ -565,6 +565,22 @@ function readBody(req) {
   });
 }
 
+// ─── /api/cache-check ───────────────────────────────────────
+// POST {items:[{text,voice,model}]} → {cached:[bool]}
+// Verifica cache (mem+disco) sem sintetizar — zero tokens consumidos
+async function handleCacheCheck(req, res) {
+  const raw = await readBody(req);
+  let items = [];
+  try { items = JSON.parse(raw).items || []; } catch {}
+  const result = items.map(({ text, voice, model }) => {
+    const effectiveModel = GEMINI_MODE === 'live' ? LIVE_MODEL : (model || DEFAULT_MODEL);
+    const allModels = [effectiveModel, ...FALLBACK_MODELS, 'edge-tts'];
+    return allModels.some(m => cacheGet(cacheKey(text || '', voice || DEFAULT_VOICE, m)) !== null);
+  });
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ cached: result }));
+}
+
 // ─── Servidor HTTP ──────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
@@ -590,6 +606,10 @@ const server = http.createServer(async (req, res) => {
     } catch {
       res.writeHead(404); return res.end('UI not found');
     }
+  }
+
+  if (req.method === 'POST' && path === '/api/cache-check') {
+    return handleCacheCheck(req, res);
   }
 
   if (req.method === 'GET' && path === '/health') {
