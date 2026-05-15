@@ -431,14 +431,10 @@ function previewSplit() {
 }
 
 async function startPrefetch() {
-  const text = document.getElementById('inputText').value;
-  if (!text.trim()) return;
-  const parts = splitParagraphs(text);
-  if (!parts.length) return;
-
-  // Se ainda não fez preview, inicializa
-  if (paragraphs.length !== parts.length) {
-    paragraphs = parts.map(t => ({text:t, status:'queued', url:null, selected:false}));
+  // Se ainda não carregou parágrafos, faz o split agora
+  if (paragraphs.length === 0) {
+    previewSplit();
+    if (paragraphs.length === 0) return;
   }
 
   // Determina alvos (selecionados, ou todos se nenhum marcado)
