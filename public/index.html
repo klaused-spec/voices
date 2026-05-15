@@ -70,6 +70,8 @@ btn,.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;p
 .audio-progress{flex:1;height:4px;background:var(--border);border-radius:999px;cursor:pointer;position:relative}
 .audio-fill{height:100%;background:var(--accent);border-radius:999px;transition:width .1s}
 .token-row{margin-top:12px}
+.range-row{margin-top:12px}
+.range-row input[type=number]{width:70px;padding:6px 10px}
 .pdf-drop{border:1.5px dashed var(--border);border-radius:8px;padding:10px 14px;margin-top:10px;display:flex;align-items:center;gap:10px;cursor:pointer;transition:border .2s;font-size:.85rem;color:var(--muted)}
 .pdf-drop:hover{border-color:var(--accent);color:var(--accent)}
 .pdf-drop input{display:none}
@@ -124,10 +126,22 @@ btn,.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;p
           <input type="text" id="tokenInput" placeholder="AUTH_TOKEN (deixe vazio se não usar)" />
         </div>
 
+        <div class="range-row" id="rangeRow" style="display:none">
+          <label style="margin-top:12px">Intervalo de parágrafos</label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="font-size:.8rem;color:var(--muted)">De</span>
+            <input type="number" id="rangeFrom" min="1" value="1" style="width:70px">
+            <span style="font-size:.8rem;color:var(--muted)">até</span>
+            <input type="number" id="rangeTo" min="1" value="1" style="width:70px">
+            <span id="rangeTotal" style="font-size:.78rem;color:var(--muted)"></span>
+          </div>
+        </div>
+
         <div class="actions">
-          <button class="btn btn-primary" id="btnPrefetch" onclick="startPrefetch()">⚡ Prefetch</button>
-          <button class="btn btn-primary" id="btnPlay" onclick="startPlay()" disabled>▶ Play</button>
-          <button class="btn btn-secondary" onclick="resetAll()">✕ Limpar</button>
+          <button class="btn btn-secondary" id="btnSplit" onclick="previewSplit()">&#128196; Ver parágrafos</button>
+          <button class="btn btn-primary" id="btnPrefetch" onclick="startPrefetch()">&#9889; Prefetch</button>
+          <button class="btn btn-primary" id="btnPlay" onclick="startPlay()" disabled>&#9654; Play</button>
+          <button class="btn btn-secondary" onclick="resetAll()">&#10005; Limpar</button>
         </div>
 
         <div class="progress-wrap" id="progressWrap" style="display:none">
@@ -318,16 +332,59 @@ async function runWorker() {
   activeWorkers--;
 }
 
-function startPrefetch() {
+// ── Preview split (show paragraphs without prefetching) ──────
+function previewSplit() {
   const text = document.getElementById('inputText').value;
   if (!text.trim()) return;
   const parts = splitParagraphs(text);
   if (!parts.length) return;
   paragraphs = parts.map(t => ({text:t, status:'queued', url:null}));
-  prefetchQueue = [...Array(paragraphs.length).keys()];
+  currentIdx = -1;
+  isPlaying = false;
+  // Show range selector populated with total
+  const total = paragraphs.length;
+  document.getElementById('rangeFrom').value = 1;
+  document.getElementById('rangeTo').value = total;
+  document.getElementById('rangeFrom').max = total;
+  document.getElementById('rangeTo').max = total;
+  document.getElementById('rangeTotal').textContent = `de ${total} parágrafos`;
+  document.getElementById('rangeRow').style.display = 'block';
+  document.getElementById('progressWrap').style.display = 'none';
+  renderList();
+}
+
+function startPrefetch() {
+  const text = document.getElementById('inputText').value;
+  if (!text.trim()) return;
+  const parts = splitParagraphs(text);
+  if (!parts.length) return;
+
+  // Se ainda não fez preview, inicializa tudo
+  if (paragraphs.length !== parts.length) {
+    paragraphs = parts.map(t => ({text:t, status:'queued', url:null}));
+  }
+
+  // Lê o intervalo (1-based → 0-based)
+  const total = paragraphs.length;
+  const from = Math.max(1, parseInt(document.getElementById('rangeFrom').value) || 1) - 1;
+  const to   = Math.min(total, parseInt(document.getElementById('rangeTo').value) || total) - 1;
+
+  // Marca como queued apenas os do intervalo (mantém cached dos outros)
+  for (let i = from; i <= to; i++) {
+    if (paragraphs[i].status !== 'cached') paragraphs[i].status = 'queued';
+  }
+  prefetchQueue = [];
+  for (let i = from; i <= to; i++) {
+    if (paragraphs[i].status === 'queued') prefetchQueue.push(i);
+  }
+
   currentIdx = -1;
   isPlaying = false;
   document.getElementById('progressWrap').style.display = 'block';
+  document.getElementById('rangeRow').style.display = 'block';
+  document.getElementById('rangeTotal').textContent = `de ${total} parágrafos`;
+  document.getElementById('rangeFrom').max = total;
+  document.getElementById('rangeTo').max = total;
   renderList();
   const conc = parseInt(document.getElementById('concurrency').value) || 2;
   activeWorkers = 0;
@@ -343,6 +400,7 @@ function resetAll() {
   audioEl.pause();
   document.getElementById('playerCard').style.display = 'none';
   document.getElementById('progressWrap').style.display = 'none';
+  document.getElementById('rangeRow').style.display = 'none';
   document.getElementById('btnPlay').disabled = true;
   document.getElementById('ctrlPlay').textContent = '▶';
   renderList();
@@ -402,7 +460,7 @@ function seekAudio(e) {
 }
 
 // Expose to window for inline onclick handlers (required for type=module)
-Object.assign(window, { startPrefetch, startPlay, resetAll, playPrev, playNext, togglePlay, seekAudio });
+Object.assign(window, { startPrefetch, previewSplit, startPlay, resetAll, playPrev, playNext, togglePlay, seekAudio });
 </script>
 </body>
 </html>
