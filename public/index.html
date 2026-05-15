@@ -6,6 +6,7 @@
 <title>TTS Prefetch Studio</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs" type="module" id="pdfjs-script"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -69,6 +70,10 @@ btn,.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;p
 .audio-progress{flex:1;height:4px;background:var(--border);border-radius:999px;cursor:pointer;position:relative}
 .audio-fill{height:100%;background:var(--accent);border-radius:999px;transition:width .1s}
 .token-row{margin-top:12px}
+.pdf-drop{border:1.5px dashed var(--border);border-radius:8px;padding:10px 14px;margin-top:10px;display:flex;align-items:center;gap:10px;cursor:pointer;transition:border .2s;font-size:.85rem;color:var(--muted)}
+.pdf-drop:hover{border-color:var(--accent);color:var(--accent)}
+.pdf-drop input{display:none}
+.pdf-status{font-size:.78rem;color:var(--green);margin-top:6px;display:none}
 @keyframes spin{to{transform:rotate(360deg)}}
 .spinner{display:inline-block;width:10px;height:10px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite}
 @media(max-width:768px){.grid{grid-template-columns:1fr}.para-list{max-height:260px}}
@@ -85,6 +90,11 @@ btn,.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;p
       <div class="card">
         <label>Texto</label>
         <textarea id="inputText" placeholder="Cole aqui o texto que deseja ouvir...&#10;&#10;Parágrafos são separados por linha em branco."></textarea>
+        <label class="pdf-drop" id="pdfDropLabel" title="Importar PDF">
+          <input type="file" id="pdfInput" accept=".pdf" onchange="loadPdf(this)">
+          <span>📄</span> <span id="pdfLabel">Importar PDF…</span>
+        </label>
+        <div class="pdf-status" id="pdfStatus"></div>
 
         <div class="row">
           <div>
@@ -156,13 +166,47 @@ btn,.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;p
 
 <audio id="audioEl" style="display:none"></audio>
 
-<script>
+<script type="module">
 const BASE = window.location.origin;
 let paragraphs = [];   // {text, status:'queued'|'loading'|'cached'|'error', url:null}
 let currentIdx = -1;
 let isPlaying = false;
 let prefetchQueue = [];
 let activeWorkers = 0;
+
+// ── PDF import ───────────────────────────────────────────────
+import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs';
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs';
+
+window.loadPdf = async function(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const label = document.getElementById('pdfLabel');
+  const status = document.getElementById('pdfStatus');
+  label.innerHTML = '<span class="spinner"></span> Extraindo...';
+  status.style.display = 'none';
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    const pages = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      pages.push(content.items.map(it => it.str).join(' '));
+    }
+    const fullText = pages.join('\n\n').replace(/[ \t]+/g, ' ').trim();
+    document.getElementById('inputText').value = fullText;
+    label.textContent = `📄 ${file.name}`;
+    status.textContent = `✅ ${pdf.numPages} página(s) extraída(s) — ${fullText.split(/\n\s*\n/).filter(p=>p.trim()).length} parágrafos`;
+    status.style.display = 'block';
+  } catch(e) {
+    label.textContent = '📄 Importar PDF…';
+    status.textContent = `❌ Erro: ${e.message}`;
+    status.style.color = 'var(--red)';
+    status.style.display = 'block';
+  }
+  input.value = '';
+};
 
 const audioEl = document.getElementById('audioEl');
 audioEl.addEventListener('ended', () => { playNext(); });
@@ -356,6 +400,9 @@ function seekAudio(e) {
   const pct = (e.clientX - rect.left) / rect.width;
   audioEl.currentTime = pct * audioEl.duration;
 }
+
+// Expose to window for inline onclick handlers (required for type=module)
+Object.assign(window, { startPrefetch, startPlay, resetAll, playPrev, playNext, togglePlay, seekAudio });
 </script>
 </body>
 </html>
