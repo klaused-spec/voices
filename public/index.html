@@ -123,6 +123,24 @@ btn,.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;p
               <option value="4">4</option>
             </select>
           </div>
+          <div>
+            <label style="margin-top:12px">Dividir por</label>
+            <select id="splitMode">
+              <option value="para">Parágrafo (\n\n)</option>
+              <option value="line">Linha (\n)</option>
+              <option value="sent" selected>Frases (.!?)</option>
+            </select>
+          </div>
+          <div id="sentCountWrap">
+            <label style="margin-top:12px">Frases/bloco</label>
+            <select id="sentCount">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3" selected>3</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+            </select>
+          </div>
         </div>
 
         <div class="token-row">
@@ -245,11 +263,37 @@ async function loadVoices() {
 }
 loadVoices();
 
+// Mostra/esconde "Frases/bloco" conforme o modo de divisão
+document.getElementById('splitMode').addEventListener('change', function() {
+  document.getElementById('sentCountWrap').style.display = this.value === 'sent' ? '' : 'none';
+});
+
+
 // ── Split text ───────────────────────────────────────────────
 function splitParagraphs(text) {
-  return text.split(/\n\s*\n/)
-    .map(p => p.trim())
-    .filter(p => p.length > 0);
+  const mode = document.getElementById('splitMode').value;
+
+  if (mode === 'para') {
+    return text.split(/\n\s*\n/).map(p => p.trim()).filter(p => p.length > 0);
+  }
+
+  if (mode === 'line') {
+    return text.split(/\n/).map(p => p.trim()).filter(p => p.length > 0);
+  }
+
+  // mode === 'sent' — agrupa N frases por bloco
+  const n = parseInt(document.getElementById('sentCount').value) || 3;
+  // Divide por . ! ? seguido de espaço ou fim de linha, preservando o pontuação
+  const sentences = text
+    .replace(/([.!?])(["\u201d]?)\s+/g, '$1$2\x00')
+    .split('\x00')
+    .map(s => s.trim())
+    .filter(s => s.length > 1);
+  const chunks = [];
+  for (let i = 0; i < sentences.length; i += n) {
+    chunks.push(sentences.slice(i, i + n).join(' '));
+  }
+  return chunks;
 }
 
 // ── Render list ──────────────────────────────────────────────
